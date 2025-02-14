@@ -6,10 +6,6 @@ VERSION := $(shell git describe --always --dirty)
 ghostunnel: $(SOURCE_FILES)
 	go build -ldflags '-X main.version=${VERSION}' -o ghostunnel .
 
-# Ghostunnel binary with certstore enabled
-ghostunnel.certstore: $(SOURCE_FILES)
-	go build -tags certstore -ldflags '-X main.version=${VERSION}' -o ghostunnel.certstore .
-
 # Man page
 ghostunnel.man: ghostunnel
 	./ghostunnel --help-custom-man > $@
@@ -24,7 +20,7 @@ clean:
 .PHONY: clean
 
 # Run all tests (unit + integration tests)
-test: unit $(INTEGRATION_TESTS)
+test: unit integration
 	gocovmerge coverage/*.profile | grep -v "internal/test" > coverage/all.profile
 	@echo "PASS"
 .PHONY: test
@@ -34,6 +30,9 @@ unit:
 	@mkdir -p coverage
 	go test -v -covermode=count -coverprofile=coverage/unit-test.profile ./...
 .PHONY: unit
+
+integration: $(INTEGRATION_TESTS)
+.PHONY: integration
 
 # Run integration tests
 $(INTEGRATION_TESTS): ghostunnel.test

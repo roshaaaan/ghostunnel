@@ -17,9 +17,11 @@ TIMEOUT = 5
 def run_ghostunnel(args, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer, prefix=None):
     """Helper to run ghostunnel in integration test mode"""
 
-    # Default shuthdown timeout to speed up tests (otherwise defaults to 5m)
+    # Set lower than default timeouts to speed up tests 
     if not any('shutdown-timeout' in f for f in args):
-        args.append('--shutdown-timeout=5s')
+        args.append('--shutdown-timeout=0.1s')
+    if not any('close-timeout' in f for f in args):
+        args.append('--close-timeout=1s')
 
     # Enable landlock in integration tests, unless we're using PKCS11 modules.
     # Because PKCS11 modules are arbitrary SO files they can do anything at
@@ -121,7 +123,7 @@ class RootCert:
             shell=True,
             stderr=FNULL)
         call(
-            'openssl req -x509 -new -key {0}.key -days 5 -out {0}_temp.crt -subj /C=US/ST=CA/O=ghostunnel/OU={0}'.format(name),
+            'openssl req -x509 -new -key {0}.key -days 5 -out {0}_temp.crt -addext "keyUsage = digitalSignature, cRLSign, keyCertSign" -subj /C=US/ST=CA/O=ghostunnel/OU={0}'.format(name),
             shell=True)
         os.rename("{0}_temp.crt".format(name), "{0}.crt".format(name))
         call('chmod 600 {0}.key'.format(name), shell=True)
@@ -167,9 +169,22 @@ class RootCert:
                 except OSError:
                     pass
 
-
 def print_ok(msg):
     print(("\033[92m{0}\033[0m".format(msg)))
+
+def wrap_socket(socket, keyfile=None, certfile=None, ca_certs=None, cert_reqs=ssl.CERT_REQUIRED, server_side=False):
+    ctx = ssl.SSLContext();
+    if certfile is not None and keyfile is not None:
+        ctx.load_cert_chain(certfile, keyfile)
+    if ca_certs is not None:
+        ctx.load_verify_locations(cafile=ca_certs)
+    ctx.verify_mode = cert_reqs;
+    return ctx.wrap_socket(socket, server_side=server_side);
+
+def urlopen(path):
+    context = ssl.create_default_context(cafile='root.crt')
+    return urllib.request.urlopen(path, context=context)
+
 
 ######################### Abstract #########################
 
@@ -235,12 +250,11 @@ class TcpServer(MySocket):
 
 
 class TlsClient(MySocket):
-    def __init__(self, cert, ca, port, ssl_version=ssl.PROTOCOL_SSLv23):
+    def __init__(self, cert, ca, port):
         super().__init__()
         self.cert = cert
         self.ca = ca
         self.port = port
-        self.ssl_version = ssl_version
         self.tls_listener = None
 
     def connect(self, attempts=1, peer=None):
@@ -249,21 +263,19 @@ class TlsClient(MySocket):
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(TIMEOUT)
                 if self.cert is not None:
-                    self.socket = ssl.wrap_socket(sock,
+                    self.socket = wrap_socket(sock,
                                                   keyfile='{0}.key'.format(
                                                       self.cert),
                                                   certfile='{0}.crt'.format(
                                                       self.cert),
                                                   ca_certs='{0}.crt'.format(
                                                       self.ca),
-                                                  cert_reqs=ssl.CERT_REQUIRED,
-                                                  ssl_version=self.ssl_version)
+                                                  cert_reqs=ssl.CERT_REQUIRED)
                 else:
-                    self.socket = ssl.wrap_socket(sock,
+                    self.socket = wrap_socket(sock,
                                                   ca_certs='{0}.crt'.format(
                                                       self.ca),
-                                                  cert_reqs=ssl.CERT_REQUIRED,
-                                                  ssl_version=self.ssl_version)
+                                                  cert_reqs=ssl.CERT_REQUIRED)
                 self.socket.connect((LOCALHOST, self.port))
 
                 if peer is not None:
@@ -289,14 +301,12 @@ class TlsServer(MySocket):
             cert,
             ca,
             port,
-            cert_reqs=ssl.CERT_REQUIRED,
-            ssl_version=ssl.PROTOCOL_SSLv23):
+            cert_reqs=ssl.CERT_REQUIRED):
         super().__init__()
         self.cert = cert
         self.ca = ca
         self.port = port
         self.cert_reqs = cert_reqs
-        self.ssl_version = ssl_version
         self.tls_listener = None
 
     def listen(self):
@@ -305,15 +315,14 @@ class TlsServer(MySocket):
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((LOCALHOST, self.port))
         listener.listen(1)
-        self.tls_listener = ssl.wrap_socket(listener,
+        self.tls_listener = wrap_socket(listener,
                                             server_side=True,
                                             keyfile='{0}.key'.format(
                                                 self.cert),
                                             certfile='{0}.crt'.format(
                                                 self.cert),
                                             ca_certs='{0}.crt'.format(self.ca),
-                                            cert_reqs=self.cert_reqs,
-                                            ssl_version=self.ssl_version)
+                                            cert_reqs=self.cert_reqs)
 
     def accept(self):
         self.socket, _ = self.tls_listener.accept()
@@ -368,17 +377,20 @@ class UnixServer(MySocket):
     def __init__(self):
         super().__init__()
         self.socket_path = os.path.join(mkdtemp(), 'ghostunnel-test-socket')
+        self.listening = False
         self.listener = None
 
     def get_socket_path(self):
         return self.socket_path
 
     def listen(self):
+        if self.listening: return
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.listener.settimeout(TIMEOUT)
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind(self.socket_path)
         self.listener.listen(1)
+        self.listening = True
 
     def accept(self):
         self.socket, _ = self.listener.accept()
@@ -447,6 +459,16 @@ class SocketPair():
         # Timeout
         self.server.get_socket().recv(1)
 
+    def validate_half_closing_client_closes_server(self, msg):
+        print_ok(msg)
+        # call shutdown for write (sends FIN), but don't close connection
+        self.client.get_socket().shutdown(socket.SHUT_WR)
+        # if the tunnel doesn't close the connection (forwarding the FIN packet), 
+        # then recv(1) will raise a Timeout
+        self.server.get_socket().recv(1)
+        # cleanup
+        self.client.get_socket().close()
+
     def validate_closing_server_closes_client(self, msg):
         print_ok(msg)
         self.server.get_socket().shutdown(socket.SHUT_RDWR)
@@ -454,6 +476,16 @@ class SocketPair():
         # if the tunnel doesn't close the connection, recv(1) will raise a
         # Timeout
         self.client.get_socket().recv(1)
+
+    def validate_half_closing_server_closes_client(self, msg):
+        print_ok(msg)
+        # call shutdown for write (sends FIN), but don't close connection
+        self.server.get_socket().shutdown(socket.SHUT_WR)
+        # if the tunnel doesn't close the connection (forwarding the FIN packet), 
+        # then recv(1) will raise a Timeout
+        self.client.get_socket().recv(1)
+        # cleanup
+        self.server.get_socket().close()
 
     def validate_client_cert(self, ou, msg):
         for _ in range(1, 20):

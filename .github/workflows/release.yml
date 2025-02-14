@@ -10,8 +10,8 @@ jobs:
     name: Build (Linux)
     strategy:
       matrix:
-        version: [1.22.x]
-    runs-on: ubuntu-latest
+        version: [1.23.x]
+    runs-on: ubuntu-22.04
     steps:
       - name: Set up cross toolchain
         run: |
@@ -22,14 +22,16 @@ jobs:
         with:
           go-version: ${{ matrix.version }}
         id: go
-      - name: Check out code
+      - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build binary
         run: |
-          CGO_ENABLED=1 GOARCH=amd64 make ghostunnel
+          CGO_ENABLED=1 GOARCH=amd64 make VERSION=$GITHUB_REF_NAME ghostunnel
           mv ghostunnel ghostunnel-linux-amd64
           make clean
-          CGO_ENABLED=1 GOARCH=arm64 CC=aarch64-linux-gnu-gcc make ghostunnel
+          CGO_ENABLED=1 GOARCH=arm64 CC=aarch64-linux-gnu-gcc make VERSION=$GITHUB_REF_NAME ghostunnel
           mv ghostunnel ghostunnel-linux-arm64
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -46,7 +48,7 @@ jobs:
     name: Build (MacOS)
     strategy:
       matrix:
-        version: [1.22.x]
+        version: [1.23.x]
     runs-on: macos-latest
     steps:
       - name: Set up toolchain
@@ -54,14 +56,16 @@ jobs:
         with:
           go-version: ${{ matrix.version }}
         id: go
-      - name: Check out code
+      - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build binary
         run: |
-          CGO_ENABLED=1 GOARCH=amd64 make ghostunnel
+          CGO_ENABLED=1 GOARCH=amd64 make VERSION=$GITHUB_REF_NAME ghostunnel
           mv ghostunnel ghostunnel-darwin-amd64
           make clean
-          CGO_ENABLED=1 GOARCH=arm64 make ghostunnel
+          CGO_ENABLED=1 GOARCH=arm64 make VERSION=$GITHUB_REF_NAME ghostunnel
           mv ghostunnel ghostunnel-darwin-arm64
           lipo -create -output ghostunnel-darwin-universal ghostunnel-darwin-amd64 ghostunnel-darwin-arm64
       - name: Upload artifact
@@ -84,7 +88,7 @@ jobs:
     name: Build (Windows)
     strategy:
       matrix:
-        version: [1.22.x]
+        version: [1.23.x]
     runs-on: windows-latest
     steps:
       - name: Set up toolchain
@@ -92,11 +96,13 @@ jobs:
         with:
           go-version: ${{ matrix.version }}
         id: go
-      - name: Check out code
+      - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build binary
         run: |
-          make ghostunnel
+          make VERSION=$GITHUB_REF_NAME ghostunnel
           mv ghostunnel ghostunnel-windows-amd64.exe
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -106,12 +112,15 @@ jobs:
 
   release:
     name: Create release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: [ build-linux, build-darwin, build-windows ]
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Create release
         id: create_release
         uses: actions/create-release@v1
@@ -126,7 +135,7 @@ jobs:
 
   add-assets-linux-darwin:
     name: Add assets for Linux/Darwin
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: [ build-linux, build-darwin, release ]
     strategy:
       matrix:
@@ -137,7 +146,10 @@ jobs:
         - { os: 'darwin', arch: 'arm64' }
         - { os: 'darwin', arch: 'universal' }
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
@@ -155,14 +167,17 @@ jobs:
 
   add-assets-windows:
     name: Add assets for Windows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: [ build-windows, release ]
     strategy:
       matrix:
         target:
         - { os: 'windows', arch: 'amd64' }
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
